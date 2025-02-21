@@ -4,11 +4,13 @@ import json
 import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+from flask_cors import CORS
 import openai
 
 load_dotenv()
 
 app = Flask(__name__)
+CORS(app) 
 
 # OpenAI ayarları
 openai.api_key = "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"
@@ -188,7 +190,7 @@ def report_arbitrage_from_pools(pools, token_address, min_liquidity=10000):
             lines.append(f"Price Difference: {diff_percent:.2f}%")
             return "\n".join(lines)
         else:
-            return "Lowest effective price is zero, cannot calculate arbitrage."
+            return "Lowest price is zero, cannot calculate arbitrage."
     else:
         return "Not enough pool data to compute arbitrage details."
 
@@ -263,5 +265,5 @@ def message_endpoint():
         time.sleep(5)
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 3000))
+    port = int(os.getenv("PORT", 3001))
     app.run(host="0.0.0.0", port=port)
