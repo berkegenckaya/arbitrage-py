@@ -6,6 +6,7 @@ from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from flask_cors import CORS
 import openai
+import math
 from web3 import Web3
 
 load_dotenv()
@@ -87,9 +88,109 @@ def check_and_approve(token_address, spender, required_amount):
     
     return {"status": "already_approved"}
 
-def execute_swap(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
-    """ Executes a token swap. """
+def get_pool_sqrt_price(pool_address):
+    """
+    Queries the target pool's slot0() to retrieve the current sqrtPriceX96.
+    Returns the sqrtPriceX96 as an integer.
+    """
     pool_address = w3.to_checksum_address(pool_address)
+    pool_contract = w3.eth.contract(address=pool_address, abi=[
+        {
+            "inputs": [],
+            "name": "slot0",
+            "outputs": [
+                {"internalType": "uint160", "name": "sqrtPriceX96", "type": "uint160"},
+                {"internalType": "int24", "name": "tick", "type": "int24"},
+                {"internalType": "uint16", "name": "observationIndex", "type": "uint16"},
+                {"internalType": "uint16", "name": "observationCardinality", "type": "uint16"},
+                {"internalType": "uint16", "name": "observationCardinalityNext", "type": "uint16"},
+                {"internalType": "uint8", "name": "feeProtocol", "type": "uint8"},
+                {"internalType": "bool", "name": "unlocked", "type": "bool"}
+            ],
+            "stateMutability": "view",
+            "type": "function"
+        }
+    ])
+    slot0 = pool_contract.functions.slot0().call()
+    sqrtPriceX96 = slot0[0]
+    print(f"Current sqrtPriceX96 in pool {pool_address}: {sqrtPriceX96}")
+    return sqrtPriceX96
+
+def calculate_sqrt_price_limit_buy(current_sqrt_price):
+    """
+    For a buy swap (zeroForOne = true) where token0 is wS,
+    set a price limit that is 5% lower than the current price.
+    Returns an integer sqrtPriceLimitX96.
+    """
+    factor = math.sqrt(0.95)  # Approximately 0.97468
+    new_limit = int(current_sqrt_price * factor)
+    print(f"Calculated sqrtPriceLimitX96 for buy swap (5% lower): {new_limit}")
+    return new_limit
+
+def calculate_sqrt_price_limit_sell(current_sqrt_price):
+    """
+    For a sell swap (zeroForOne = false) where token1 is EGGS,
+    set a price limit that is 5% higher than the current price.
+    Returns an integer sqrtPriceLimitX96.
+    """
+    factor = math.sqrt(1.05)  # Approximately 1.02470
+    new_limit = int(current_sqrt_price * factor)
+    print(f"Calculated sqrtPriceLimitX96 for sell swap (5% higher): {new_limit}")
+    return new_limit
+
+
+def execute_swap(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
+    """
+    Executes a swap via the SwapExecutor contract.
+    Before executing, it auto-approves the spending token if necessary.
+    
+    pool_address: The target pool contract address.
+    zeroForOne: If true, swaps token0 for token1 (for buy action, spending wS to get EGGS);
+                if false, swaps token1 for token0 (for sell action).
+    amountSpecified: Amount to swap (in the smallest unit of the input token).
+    sqrtPriceLimitX96: Slippage limit in Q96 format. If set to 0, it will be computed automatically.
+    """
+    pool_address = w3.to_checksum_address(pool_address)
+    # Create a minimal pool instance to query token0 and token1.
+    pool_contract = w3.eth.contract(address=pool_address, abi=[
+        {
+            "constant": True,
+            "inputs": [],
+            "name": "token0",
+            "outputs": [{"name": "", "type": "address"}],
+            "type": "function"
+        },
+        {
+            "constant": True,
+            "inputs": [],
+            "name": "token1",
+            "outputs": [{"name": "", "type": "address"}],
+            "type": "function"
+        }
+    ])
+    
+    if zeroForOne:
+        # For a buy swap, we're spending token0 (wS) to buy token1 (EGGS).
+        spend_token = pool_contract.functions.token0().call()
+    else:
+        # For a sell swap, we're spending token1 (EGGS) to get token0 (wS).
+        spend_token = pool_contract.functions.token1().call()
+    
+    print(f"Spending token for swap: {spend_token}")
+    
+    # Auto-approve the spending token if needed.
+    check_and_approve(spend_token, SWAP_EXECUTOR_ADDRESS, amountSpecified)
+    
+    # If sqrtPriceLimitX96 is zero, calculate it dynamically.
+    if sqrtPriceLimitX96 == 0:
+        current_sqrt_price = get_pool_sqrt_price(pool_address)
+        if zeroForOne:
+            # For buy swap, set limit 5% lower than current.
+            sqrtPriceLimitX96 = calculate_sqrt_price_limit_buy(current_sqrt_price)
+        else:
+            # For sell swap, set limit 5% higher than current.
+            sqrtPriceLimitX96 = calculate_sqrt_price_limit_sell(current_sqrt_price)
+    
     tx = swap_executor.functions.executeSwap(
         pool_address,
         zeroForOne,
@@ -101,11 +202,11 @@ def execute_swap(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
         'gas': 2000000,
         'gasPrice': get_gas_price()
     })
-    
     signed_tx = w3.eth.account.sign_transaction(tx, private_key=PRIVATE_KEY)
     tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+    print("Swap tx sent. Tx hash:", w3.to_hex(tx_hash))
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-    return {"status": "swap_executed", "tx_hash": w3.to_hex(tx_hash)}
+    print("Swap receipt:", receipt)
 
 
 def create_thread():
