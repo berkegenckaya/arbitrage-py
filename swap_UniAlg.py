@@ -122,10 +122,9 @@ def get_pool_sqrt_price_alg(pool_address):
             "outputs": [
                 {"internalType": "uint160", "name": "price", "type": "uint160"},
                 {"internalType": "int24", "name": "tick", "type": "int24"},
-                {"internalType": "uint16", "name": "observationIndex", "type": "uint16"},
-                {"internalType": "uint16", "name": "observationCardinality", "type": "uint16"},
-                {"internalType": "uint16", "name": "observationCardinalityNext", "type": "uint16"},
-                {"internalType": "uint8", "name": "feeProtocol", "type": "uint8"},
+                {"internalType": "uint16", "name": "fee", "type": "uint16"},
+                {"internalType": "uint16", "name": "index", "type": "uint16"},
+                {"internalType": "uint16", "name": "parameter", "type": "uint16"},
                 {"internalType": "bool", "name": "unlocked", "type": "bool"}
             ],
             "stateMutability": "view",
@@ -244,4 +243,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-s
