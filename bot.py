@@ -150,6 +150,7 @@ def execute_swap(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
     amountSpecified: Amount to swap (in the smallest unit of the input token).
     sqrtPriceLimitX96: Slippage limit in Q96 format. If set to 0, it will be computed automatically.
     """
+    print(f"🟢Executing swap on pool {pool_address}...")
     pool_address = w3.to_checksum_address(pool_address)
     # Create a minimal pool instance to query token0 and token1.
     pool_contract = w3.eth.contract(address=pool_address, abi=[
@@ -180,6 +181,7 @@ def execute_swap(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
     
     # Auto-approve the spending token if needed.
     check_and_approve(spend_token, SWAP_EXECUTOR_ADDRESS, amountSpecified)
+    print(sqrtPriceLimitX96)
     
     # If sqrtPriceLimitX96 is zero, calculate it dynamically.
     if sqrtPriceLimitX96 == 0:
@@ -207,6 +209,7 @@ def execute_swap(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
     print("Swap tx sent. Tx hash:", w3.to_hex(tx_hash))
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
     print("Swap receipt:", receipt)
+    return {"status": "swapped", "tx_hash": w3.to_hex(tx_hash)}
 
 
 def create_thread():
@@ -249,17 +252,22 @@ def list_messages(thread_id):
     messages = response.data
     return messages
 
-def submit_tool_outputs(thread_id, run_id, tool_call_id, output_dict):
-    print(f"Submitting tool outputs: thread={thread_id}, run={run_id}, tool_call_id={tool_call_id}")
-    print("Output sent:", output_dict)
+def submit_tool_outputs(thread_id, run_id, tool_outputs):
+    print(f"Submitting {len(tool_outputs)} tool outputs: thread={thread_id}, run={run_id}")
+    for tool_output in tool_outputs:
+        print(f"🔹 Tool Call ID: {tool_output['call_id']}")
+        print(f"🔹 Output Sent: {tool_output['output']}")
+
+    # Submit all tool outputs at once
     response = openai.beta.threads.runs.submit_tool_outputs(
         thread_id=thread_id,
         run_id=run_id,
         tool_outputs=[{
-            "tool_call_id": tool_call_id,
-            "output": json.dumps(output_dict)
-        }]
+            "tool_call_id": tool_output["call_id"],
+            "output": json.dumps(tool_output["output"])
+        } for tool_output in tool_outputs]  # Convert list to correct format
     )
+
     return response
 
 
@@ -302,7 +310,7 @@ def fetch_token_pools(chain_id, token_address):
     Endpoint: /token-pairs/v1/{chainId}//{tokenAddress}
     Example URL for Sonic: https://api.dexscreener.com/token-pairs/v1/sonic//{tokenAddress}
     """
-    url = f"https://api.dexscreener.com/token-pairs/v1/{chain_id}//{token_address}"
+    url = f"https://api.dexscreener.com/token-pairs/v1/sonic//{token_address}"
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
@@ -451,12 +459,12 @@ def approve_endpoint():
 @app.route('/swap', methods=['POST'])
 def swap_endpoint():
     data = request.get_json()
-    pool_address = data.get("pool_address")
-    zeroForOne = data.get("zeroForOne")
-    amountSpecified = data.get("amountSpecified")
-    sqrtPriceLimitX96 = data.get("sqrtPriceLimitX96")
+    pool_address = "0x713FB5036dC70012588d77a5B066f1Dd05c712d7"
+    zeroForOne = True
+    amountSpecified = 1
+    
 
-    response = execute_swap(pool_address, True, amountSpecified, 1461446703485210103287273052203988822378723970340)
+    response = execute_swap("0x713FB5036dC70012588d77a5B066f1Dd05c712d7", True, 1, 79228162514264337593543950336)
     return jsonify(response)
 # Flask Endpoint'leri
 @app.route('/pairinfo', methods=['GET'])
@@ -478,63 +486,66 @@ def message_endpoint():
     data = request.get_json()
     message = data.get("message")
     threadId = data.get("threadId")
-    if not message or not threadId:
-        return jsonify({"error": "Hem 'message' hem de 'threadId' gereklidir."}), 400
 
+    if not message or not threadId:
+        return jsonify({"error": "Both 'message' and 'threadId' are required."}), 400
+
+    # Add message and initiate assistant run
     add_message(threadId, message)
     run = run_assistant(threadId)
     runId = run.id
 
-    # Polling: Asistanın durumunu 5 saniyelik aralıklarla kontrol et
+    # Polling: Check assistant status every 5 seconds
     while True:
         status, run_object = checking_status(threadId, runId)
+
         if status == "completed":
             messages_list = list_messages(threadId)
-            # Gerçek OpenAI cevabı genellikle "assistant" rolündeki mesajda yer alır.
             assistant_message = next((msg for msg in messages_list if msg.role == "assistant"), None)
-            if assistant_message:
-                    return jsonify({"assistant_response": str(assistant_message.content[0].text.value)})
 
-            else:
-                return jsonify({"assistant_response": "Assistant yanıtı bulunamadı."})
+            return jsonify({"assistant_response": assistant_message.content[0].text.value if assistant_message else "No response from assistant."})
+
         elif status == "requires_action":
             print("🔄 Assistant requires an action...")
+
             tool_calls = run_object.required_action.submit_tool_outputs.tool_calls
-            if tool_calls:
-                tool_call = tool_calls[0]
-                function_name = tool_call.function.name;
-                
+            tool_outputs = []
+
+            for tool_call in tool_calls:
+                function_name = tool_call.function.name
+                parsed_args = json.loads(tool_call.function.arguments or "{}")
+                print(f"📩 Assistant requested: {function_name}")
+                print("Parsed Args:", parsed_args)
+
                 if function_name == "get_pair_info":
-                    print("📩 Assistant requested yield pair analysis...")
-                    parsed_args = json.loads(tool_call.function.arguments or "{}")
-                    print("Parsed Args:", parsed_args)
-                    chainId_arg = parsed_args.get("chainId")
-                    tokenAddress_arg = parsed_args.get("tokenAddress")
-                    pair_info = get_pair_info(chainId_arg, tokenAddress_arg)
-                    submit_tool_outputs(threadId, runId, tool_call.id, {"pairInfo": pair_info})
+                    response = get_pair_info(parsed_args.get("chainId"), parsed_args.get("tokenAddress"))
+                    tool_outputs.append({"call_id": tool_call.id, "output": {"pairInfo": response}})
                     print("✅ Yield pair info sent to OpenAI!")
+
                 elif function_name == "execute_swap":
-                    print("📩 Assistant requested swap execution...")
-                    parsed_args = json.loads(tool_call.function.arguments or "{}")
-                    print("Parsed Args:", parsed_args)
                     response = execute_swap(
                         parsed_args.get("pool_address"),
-                        False,
+                        parsed_args.get("zeroForOne"),
                         parsed_args.get("amountSpecified"),
-                        1461446703485210103287273052203988822378723970340
+                        0,
                     )
-                    submit_tool_outputs(threadId, runId, tool_call.id, response)
+                    tool_outputs.append({"call_id": tool_call.id, "output": response})
+                    print("✅ Swap execution response sent to OpenAI!")
+
                 elif function_name == "approve_tokens":
-                    parsed_args = json.loads(tool_call.function.arguments or "{}")
                     response = check_and_approve(
                         parsed_args.get("token_address"),
                         SWAP_EXECUTOR_ADDRESS,
                         parsed_args.get("amount")
                     )
-                    submit_tool_outputs(threadId, runId, tool_call.id, response)
+                    tool_outputs.append({"call_id": tool_call.id, "output": response})
+                    print("✅ Token approval response sent to OpenAI!")
 
-                
-        time.sleep(5)
+            # Submit all tool outputs at once to prevent missing responses
+            if tool_outputs:
+                submit_tool_outputs(threadId, runId, tool_outputs)
+
+        time.sleep(5)  # Wait before polling again
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 3001))
