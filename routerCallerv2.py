@@ -40,7 +40,7 @@ erc20_abi = [
             {"name": "spender", "type": "address"}
         ],
         "name": "allowance",
-        "outputs": [{"name": "", "type": "uint256"}],
+        "outputs": [{"name": "", "type": "uints256"}],
         "type": "function"
     },
     {
