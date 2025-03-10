@@ -221,7 +221,7 @@ def unwrap_native(amount):
 
 def execute_swap(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
     """
-    Executes a swap via the SwapExecutor contract.
+    Executes a swap via the SwapExecutor contract
     For a buy swap (zeroForOne=True), it checks the wS balance and wraps native S if needed.
     For a sell swap, after the swap it automatically unwraps the resulting wS back to S.
     """
