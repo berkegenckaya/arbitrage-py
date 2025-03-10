@@ -473,8 +473,7 @@ def get_active_run(thread_id):
             return run.id
     return None
 
-def wait_for_run_to_complete(thread_id, run_id, timeout=60):
-    """Wait until the specified run is no longer active, or until a timeout occurs."""
+def wait_for_run_to_complete(thread_id, run_id, timeout=10):
     start_time = time.time()
     while time.time() - start_time < timeout:
         run = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run_id)
@@ -498,27 +497,47 @@ def cancel_run(thread_id, run_id):
     except Exception as e:
         print(f"Error cancelling run {run_id}: {e}")
         return None
+def cancel_run_with_retries(thread_id, run_id, retries=3, delay=3):
+    for i in range(retries):
+        try:
+            print(f"Attempt {i+1} to cancel run {run_id}...")
+            cancel_run(thread_id, run_id)
+            if wait_for_run_to_complete(thread_id, run_id, timeout=5):
+                return True
+        except Exception as e:
+            print(f"Cancel attempt {i+1} failed: {e}")
+        time.sleep(delay)
+    return False
 
-def add_message_safe(thread_id, message):
-    """
-    Checks for an active run and cancels it if found,
-    then adds the new message to the thread.
-    """
-    active_run = get_active_run(thread_id)
-    if active_run:
-        print(f"Active run {active_run} detected. Cancelling it before adding new message...")
-        cancel_run(thread_id, active_run)
-        # Wait until the active run is no longer active.
-        if not wait_for_run_to_complete(thread_id, active_run):
-            raise Exception("Active run did not finish cancelling within the timeout period.")
-    print(f"Adding new message to thread: {thread_id}")
-    response = openai.beta.threads.messages.create(
-        thread_id=thread_id,
-        role="user",
-        content=message
-    )
-    return response
-
+def add_message_safe(thread_id, message, max_retries=5, retry_interval=3):
+    retries = 0
+    while retries < max_retries:
+        try:
+            print(f"Attempting to add new message to thread: {thread_id}")
+            response = openai.beta.threads.messages.create(
+                thread_id=thread_id,
+                role="user",
+                content=message
+            )
+            print("Message added successfully.")
+            return response
+        except openai.BadRequestError as e:
+            error_str = str(e)
+            if "Can't add messages to" in error_str:
+                print(f"Error detected: {error_str}")
+                active_run = get_active_run(thread_id)
+                if active_run:
+                    print(f"Active run {active_run} detected. Attempting to cancel it...")
+                    if not cancel_run_with_retries(thread_id, active_run):
+                        print("Warning: Active run could not be cancelled in time. Proceeding anyway might cause errors.")
+                else:
+                    print("No active run detected despite error message.")
+            else:
+                raise e
+        retries += 1
+        print(f"Retrying to add message (attempt {retries}/{max_retries})...")
+        time.sleep(retry_interval)
+    raise Exception("Max retries exceeded. Could not add message to thread.")
 def run_assistant_with_cancel(thread_id):
     """
     Cancels any active run and then starts a new run on the thread.
