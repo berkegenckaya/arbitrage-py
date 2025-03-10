@@ -22,6 +22,10 @@ RPC_URL = os.environ.get("RPC_URL")
 PRIVATE_KEY = os.environ.get("PRIVATE_KEY")
 YOUR_ADDRESS = os.environ.get("YOUR_ADDRESS")
 SWAP_EXECUTOR_ADDRESS =os.environ.get("SWAP_EXECUTOR_ADDRESS")
+WS_ADDRESS = os.environ.get("WS_ADDRESS")  # Wrapped S token address
+
+
+
 
 # Connect to the network
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
@@ -29,8 +33,10 @@ if not w3.is_connected():
     print("Connection to RPC failed.")
     exit()
 
+
 YOUR_ADDRESS = w3.to_checksum_address(YOUR_ADDRESS)
 SWAP_EXECUTOR_ADDRESS = w3.to_checksum_address(SWAP_EXECUTOR_ADDRESS)
+WS_ADDRESS = w3.to_checksum_address("0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38")
 
 # Load the SwapExecutor contract ABI from file
 with open('SwapExecutorABI.json', 'r') as abi_file:
@@ -42,8 +48,8 @@ erc20_abi = [
     {
       "constant": True,
       "inputs": [
-        {"name": "owner", "type": "address"},
-        {"name": "spender", "type": "address"}
+          {"name": "owner", "type": "address"},
+          {"name": "spender", "type": "address"}
       ],
       "name": "allowance",
       "outputs": [{"name": "", "type": "uint256"}],
@@ -52,12 +58,44 @@ erc20_abi = [
     {
       "constant": False,
       "inputs": [
-        {"name": "spender", "type": "address"},
-        {"name": "amount", "type": "uint256"}
+          {"name": "spender", "type": "address"},
+          {"name": "amount", "type": "uint256"}
       ],
       "name": "approve",
       "outputs": [{"name": "", "type": "bool"}],
       "type": "function"
+    },
+    {
+      "constant": True,
+      "inputs": [{"name": "account", "type": "address"}],
+      "name": "balanceOf",
+      "outputs": [{"name": "", "type": "uint256"}],
+      "type": "function"
+    }
+]
+
+
+ws_abi = [
+    {
+        "inputs": [],
+        "name": "deposit",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function"
+    },
+    {
+        "inputs": [{"internalType": "uint256", "name": "wad", "type": "uint256"}],
+        "name": "withdraw",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "constant": True,
+        "inputs": [{"name": "account", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "type": "function"
     }
 ]
 
@@ -138,19 +176,50 @@ def calculate_sqrt_price_limit_sell(current_sqrt_price):
     print(f"Calculated sqrtPriceLimitX96 for sell swap (5% higher): {new_limit}")
     return new_limit
 
+def wrap_native(amount):
+    """
+    Wraps native S into wS by calling the wS contract's deposit() function.
+    'amount' is in wei.
+    """
+    ws_contract = w3.eth.contract(address=WS_ADDRESS, abi=ws_abi)
+    tx = ws_contract.functions.deposit().build_transaction({
+        'from': YOUR_ADDRESS,
+        'nonce': w3.eth.get_transaction_count(YOUR_ADDRESS),
+        'gas': 100000,
+        'gasPrice': get_gas_price(),
+        'value': amount
+    })
+    signed_tx = w3.eth.account.sign_transaction(tx, private_key=PRIVATE_KEY)
+    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+    print("Wrap tx sent. Tx hash:", w3.to_hex(tx_hash))
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+    print("Wrap receipt:", receipt)
+
+def unwrap_native(amount):
+    """
+    Unwraps wS into native S by calling the wS contract's withdraw() function.
+    'amount' is in raw units.
+    """
+    ws_contract = w3.eth.contract(address=WS_ADDRESS, abi=ws_abi)
+    tx = ws_contract.functions.withdraw(amount).build_transaction({
+        'from': YOUR_ADDRESS,
+        'nonce': w3.eth.get_transaction_count(YOUR_ADDRESS),
+        'gas': 100000,
+        'gasPrice': get_gas_price()
+    })
+    signed_tx = w3.eth.account.sign_transaction(tx, private_key=PRIVATE_KEY)
+    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+    print("Unwrap tx sent. Tx hash:", w3.to_hex(tx_hash))
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+    print("Unwrap receipt:", receipt)
+
 
 def execute_swap(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
     """
     Executes a swap via the SwapExecutor contract.
-    Before executing, it auto-approves the spending token if necessary.
-    
-    pool_address: The target pool contract address.
-    zeroForOne: If true, swaps token0 for token1 (for buy action, spending wS to get EGGS);
-                if false, swaps token1 for token0 (for sell action).
-    amountSpecified: Amount to swap (in the smallest unit of the input token).
-    sqrtPriceLimitX96: Slippage limit in Q96 format. If set to 0, it will be computed automatically.
+    For a buy swap (zeroForOne=True), it checks the wS balance and wraps native S if needed.
+    For a sell swap, after the swap it automatically unwraps the resulting wS back to S.
     """
-    print(f"🟢Executing swap on pool {pool_address}...")
     pool_address = w3.to_checksum_address(pool_address)
     # Create a minimal pool instance to query token0 and token1.
     pool_contract = w3.eth.contract(address=pool_address, abi=[
@@ -174,29 +243,36 @@ def execute_swap(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
         # For a buy swap, we're spending token0 (wS) to buy token1 (EGGS).
         spend_token = pool_contract.functions.token0().call()
     else:
-        # For a sell swap, we're spending token1 (EGGS) to get token0 (wS).
+        # For a sell swap, we're spending token1 (EGGS) to obtain token0 (wS).
         spend_token = pool_contract.functions.token1().call()
     
     print(f"Spending token for swap: {spend_token}")
     
+    # For a buy swap, check wS balance; if insufficient, wrap native S.
+    if zeroForOne:
+        ws_contract = w3.eth.contract(address=WS_ADDRESS, abi=erc20_abi)
+        current_ws_balance = ws_contract.functions.balanceOf(YOUR_ADDRESS).call()
+        print(f"Current wS balance: {current_ws_balance}")
+        if current_ws_balance < amountSpecified:
+            deficit = amountSpecified - current_ws_balance
+            print(f"Insufficient wS balance. Wrapping {deficit} wei of native S into wS...")
+            wrap_native(deficit)
+    
     # Auto-approve the spending token if needed.
     check_and_approve(spend_token, SWAP_EXECUTOR_ADDRESS, amountSpecified)
-    print(sqrtPriceLimitX96)
     
     # If sqrtPriceLimitX96 is zero, calculate it dynamically.
     if sqrtPriceLimitX96 == 0:
         current_sqrt_price = get_pool_sqrt_price(pool_address)
         if zeroForOne:
-            # For buy swap, set limit 5% lower than current.
             sqrtPriceLimitX96 = calculate_sqrt_price_limit_buy(current_sqrt_price)
         else:
-            # For sell swap, set limit 5% higher than current.
             sqrtPriceLimitX96 = calculate_sqrt_price_limit_sell(current_sqrt_price)
     
     tx = swap_executor.functions.executeSwap(
         pool_address,
         zeroForOne,
-        amountSpecified,
+        amountSpecified,  # Convert to wei
         sqrtPriceLimitX96
     ).build_transaction({
         'from': YOUR_ADDRESS,
@@ -209,6 +285,15 @@ def execute_swap(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
     print("Swap tx sent. Tx hash:", w3.to_hex(tx_hash))
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
     print("Swap receipt:", receipt)
+    
+    # For a sell swap, automatically unwrap any resulting wS to native S.
+    if not zeroForOne:
+        ws_contract = w3.eth.contract(address=WS_ADDRESS, abi=erc20_abi)
+        ws_balance = ws_contract.functions.balanceOf(YOUR_ADDRESS).call()
+        if ws_balance > 0:
+            print(f"Post-swap: unwrapping {ws_balance} wei of wS to native S...")
+            unwrap_native(ws_balance)
+
     return {"status": "swapped", "tx_hash": w3.to_hex(tx_hash)}
 
 
@@ -218,9 +303,53 @@ def create_thread():
     thread = openai.beta.threads.create()
     return thread
 
-def add_message(thread_id, message):
-    print(f"Adding a new message to thread: {thread_id}")
-    # Mesajı eklerken tüm parametreleri keyword argümanları şeklinde veriyoruz.
+def get_active_run(thread_id):
+    """Return the active run ID if there is one, else None."""
+    runs = openai.beta.threads.runs.list(thread_id=thread_id)
+    for run in runs.data:
+        if run.status in ["queued", "in_progress"]:
+            return run.id
+    return None
+
+def wait_for_run_to_complete(thread_id, run_id, timeout=60):
+    """Wait until the specified run is no longer active, or until a timeout occurs."""
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        run = openai.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run_id)
+        if run.status in ["completed", "failed", "cancelled"]:
+            print(f"Run {run_id} has completed or been cancelled.")
+            return True
+        print(f"Run {run_id} is still active. Waiting 5 seconds...")
+        time.sleep(5)
+    return False
+
+def cancel_run(thread_id, run_id):
+    """Cancel the active run for the given thread."""
+    try:
+        print(f"Cancelling run {run_id} in thread {thread_id}...")
+        response = openai.beta.threads.runs.cancel(
+            thread_id=thread_id,
+            run_id=run_id
+        )
+        print(f"Run {run_id} cancellation initiated.")
+        return response
+    except Exception as e:
+        print(f"Error cancelling run {run_id}: {e}")
+        return None
+
+def add_message_safe(thread_id, message):
+    """
+    Checks for an active run and cancels it if found,
+    then adds the new message to the thread.
+    """
+    active_run = get_active_run(thread_id)
+    if active_run:
+        print(f"Active run {active_run} detected. Cancelling it before adding new message...")
+        cancel_run(thread_id, active_run)
+        # Wait until the active run is no longer active.
+        if not wait_for_run_to_complete(thread_id, active_run):
+            raise Exception("Active run did not finish cancelling within the timeout period.")
+    print(f"Adding new message to thread: {thread_id}")
     response = openai.beta.threads.messages.create(
         thread_id=thread_id,
         role="user",
@@ -228,13 +357,39 @@ def add_message(thread_id, message):
     )
     return response
 
-def run_assistant(thread_id):
-    print(f"Running assistant for thread: {thread_id}")
+def run_assistant_with_cancel(thread_id):
+    """
+    Cancels any active run and then starts a new run on the thread.
+    """
+    active_run = get_active_run(thread_id)
+    if active_run:
+        print(f"Active run {active_run} detected. Cancelling it...")
+        cancel_run(thread_id, active_run)
+        if not wait_for_run_to_complete(thread_id, active_run):
+            raise Exception("Active run did not finish cancelling within the timeout period.")
+    print(f"Starting new run for thread: {thread_id}")
     response = openai.beta.threads.runs.create(
         thread_id=thread_id,
         assistant_id=assistant_id,
     )
-    print(response)
+    print("New run started:", response)
+    return response
+
+def add_message_safe(thread_id, message):
+    """
+    Adds a message to the thread safely. If a run is active, it cancels it first.
+    """
+    active_run = get_active_run(thread_id)
+    if active_run:
+        print(f"Active run {active_run} found. Cancelling before adding new message...")
+        cancel_run(thread_id, active_run)
+        time.sleep(5)  # Give time for cancellation to take effect.
+    print(f"Adding a new message to thread: {thread_id}")
+    response = openai.beta.threads.messages.create(
+        thread_id=thread_id,
+        role="user",
+        content=message
+    )
     return response
 
 def retrieve_run(thread_id, run_id):
@@ -491,8 +646,8 @@ def message_endpoint():
         return jsonify({"error": "Both 'message' and 'threadId' are required."}), 400
 
     # Add message and initiate assistant run
-    add_message(threadId, message)
-    run = run_assistant(threadId)
+    add_message_safe(threadId, message)
+    run = run_assistant_with_cancel(threadId)
     runId = run.id
 
     # Polling: Check assistant status every 5 seconds
@@ -526,7 +681,7 @@ def message_endpoint():
                     response = execute_swap(
                         parsed_args.get("pool_address"),
                         parsed_args.get("zeroForOne"),
-                        parsed_args.get("amountSpecified"),
+                        int(float(parsed_args.get("amountSpecified")* (10 ** 18))),
                         0,
                     )
                     tool_outputs.append({"call_id": tool_call.id, "output": response})
