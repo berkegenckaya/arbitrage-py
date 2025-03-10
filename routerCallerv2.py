@@ -293,6 +293,42 @@ def execute_swap_alg(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX9
     Supports both buy (zeroForOne=True) and sell (zeroForOne=False) swaps.
     """
     pool_address = w3.to_checksum_address(pool_address)
+    
+    # Query the pool for token addresses.
+    pool_contract = w3.eth.contract(address=pool_address, abi=[
+        {
+            "constant": True,
+            "inputs": [],
+            "name": "token0",
+            "outputs": [{"name": "", "type": "address"}],
+            "type": "function"
+        },
+        {
+            "constant": True,
+            "inputs": [],
+            "name": "token1",
+            "outputs": [{"name": "", "type": "address"}],
+            "type": "function"
+        }
+    ])
+    
+    if zeroForOne:
+        spend_token = pool_contract.functions.token0().call()
+    else:
+        spend_token = pool_contract.functions.token1().call()
+    print(f"Algebra branch – spending token: {spend_token}")
+    check_and_approve(spend_token, SWAP_EXECUTOR_ALG_ADDRESS, amountSpecified)
+    
+    # For buy swaps, check wS balance and wrap native S if needed
+    if zeroForOne:
+        ws_contract = w3.eth.contract(address=WS_ADDRESS, abi=erc20_abi)
+        current_ws_balance = ws_contract.functions.balanceOf(YOUR_ADDRESS).call()
+        print(f"Current wS balance: {current_ws_balance}")
+        if current_ws_balance < amountSpecified:
+            deficit = amountSpecified - current_ws_balance
+            print(f"Insufficient wS balance. Wrapping {deficit} wei native S into wS...")
+            wrap_native(deficit)
+            
     with open('SwapExecutorAlgABI.json', 'r') as abi_file:
         alg_abi = json.load(abi_file)
     alg_executor = w3.eth.contract(address=SWAP_EXECUTOR_ALG_ADDRESS, abi=alg_abi)
