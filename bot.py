@@ -39,7 +39,7 @@ SWAP_EXECUTOR_ADDRESS = w3.to_checksum_address(SWAP_EXECUTOR_ADDRESS)
 WS_ADDRESS = w3.to_checksum_address("0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38")
 
 # Load the SwapExecutor contract ABI from file
-with open('SwapExecutorABI.json', 'r') as abi_file:
+with open('SwapExecutorUniABI.json', 'r') as abi_file:
     swap_executor_abi = json.load(abi_file)
 
 swap_executor = w3.eth.contract(address=SWAP_EXECUTOR_ADDRESS, abi=swap_executor_abi)
@@ -107,12 +107,13 @@ def get_gas_price():
     return int(base_gas_price * 1.1)
 
 def check_and_approve(token_address, spender, required_amount):
-    """ Checks and approves ERC20 token allowance. """
+    """Checks token allowance and sends an approval transaction if needed."""
     token_address = w3.to_checksum_address(token_address)
     token_contract = w3.eth.contract(address=token_address, abi=erc20_abi)
     current_allowance = token_contract.functions.allowance(YOUR_ADDRESS, spender).call()
-    
+    print(f"Current allowance for token {token_address}: {current_allowance}")
     if current_allowance < required_amount:
+        print(f"Allowance ({current_allowance}) is less than required ({required_amount}). Sending approval tx...")
         tx = token_contract.functions.approve(spender, required_amount).build_transaction({
             'from': YOUR_ADDRESS,
             'nonce': w3.eth.get_transaction_count(YOUR_ADDRESS),
@@ -121,7 +122,11 @@ def check_and_approve(token_address, spender, required_amount):
         })
         signed_tx = w3.eth.account.sign_transaction(tx, private_key=PRIVATE_KEY)
         tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        print("Approval tx sent. Tx hash:", w3.to_hex(tx_hash))
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+        print("Approval receipt:", receipt)
+    else:
+        print("Sufficient allowance already exists.")
         return {"status": "approved", "tx_hash": w3.to_hex(tx_hash)}
     
     return {"status": "already_approved"}
@@ -216,7 +221,7 @@ def unwrap_native(amount):
 
 def execute_swap(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
     """
-    Executes a swap via the SwapExecutor contract.
+    Executes a swap via the SwapExecutor contract
     For a buy swap (zeroForOne=True), it checks the wS balance and wraps native S if needed.
     For a sell swap, after the swap it automatically unwraps the resulting wS back to S.
     """
