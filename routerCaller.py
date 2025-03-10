@@ -178,7 +178,7 @@ def wrap_native(amount):
         'nonce': w3.eth.get_transaction_count(YOUR_ADDRESS),
         'gas': 100000,
         'gasPrice': get_gas_price(),
-        'value': amount
+        'value': int(amount)* 10**18
     })
     signed_tx = w3.eth.account.sign_transaction(tx, private_key=PRIVATE_KEY)
     tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
