@@ -19,7 +19,8 @@ def fetch_token_pools(chain_id, token_address):
 def report_arbitrage_from_pools(pools, token_address, min_liquidity=10000):
     """
     For a list of pool objects, compute the USD price for the given token,
-    but only consider pools where the token appears as the base token.
+    but only consider pools where the token appears as the base token and
+    the DEX is one of: shadow-exchange, swapx, wagmi, silverswap, spookyswap, or sushiswap.
     Pools with liquidity below min_liquidity are filtered out.
     Then, sort the pools by price (high to low) and report the highest and lowest prices,
     along with the computed percentage difference. Display the DEX, constructed pair name, and pair address.
@@ -27,6 +28,9 @@ def report_arbitrage_from_pools(pools, token_address, min_liquidity=10000):
     token_address_lower = token_address.lower()
     valid_prices = []
     token_name = None
+
+    # Allowed DEXes (all lower-case)
+    allowed_dexes = {"shadow-exchange", "swapx", "wagmi", "silverswap", "spookyswap", "sushiswap"}
 
     for pool in pools:
         try:
@@ -38,6 +42,11 @@ def report_arbitrage_from_pools(pools, token_address, min_liquidity=10000):
             base = pool.get("baseToken", {})
             base_addr = base.get("address", "").lower()
             if token_address_lower != base_addr:
+                continue
+
+            # Filter by allowed dexes:
+            dex_id = pool.get("dexId", "").lower()
+            if dex_id not in allowed_dexes:
                 continue
 
             try:
