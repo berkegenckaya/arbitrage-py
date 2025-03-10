@@ -319,7 +319,7 @@ def execute_swap_alg(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX9
     print(f"Algebra branch – spending token: {spend_token}")
     check_and_approve(spend_token, SWAP_EXECUTOR_ALG_ADDRESS, amountSpecified)
     
-    # For buy swaps, check wS balance and wrap native S if needed
+    # For buy swaps, check wS balance and wrap native S if needed.
     if zeroForOne:
         ws_contract = w3.eth.contract(address=WS_ADDRESS, abi=erc20_abi)
         current_ws_balance = ws_contract.functions.balanceOf(YOUR_ADDRESS).call()
@@ -329,15 +329,15 @@ def execute_swap_alg(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX9
             print(f"Insufficient wS balance. Wrapping {deficit} wei native S into wS...")
             wrap_native(deficit)
             
-    with open('SwapExecutorAlgABI.json', 'r') as abi_file:
-        alg_abi = json.load(abi_file)
-    alg_executor = w3.eth.contract(address=SWAP_EXECUTOR_ALG_ADDRESS, abi=alg_abi)
     if sqrtPriceLimitX96 == 0:
         current_sqrt_price = get_pool_sqrt_price_alg(pool_address)
         if zeroForOne:
             sqrtPriceLimitX96 = calculate_sqrt_price_limit_buy(current_sqrt_price)
         else:
             sqrtPriceLimitX96 = calculate_sqrt_price_limit_sell(current_sqrt_price)
+    with open('SwapExecutorAlgABI.json', 'r') as abi_file:
+        alg_abi = json.load(abi_file)
+    alg_executor = w3.eth.contract(address=SWAP_EXECUTOR_ALG_ADDRESS, abi=alg_abi)
     tx = alg_executor.functions.executeSwap(
         pool_address,
         zeroForOne,
@@ -362,18 +362,24 @@ def execute_swap_alg(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX9
             unwrap_native(ws_balance)
 
 def main():
-    print("Select pool type:")
-    print("1. UniswapV3-style pool")
-    print("2. Algebra-style pool")
-    pool_choice = input("Enter 1 or 2: ").strip()
-    if pool_choice == "1":
-        pool_type = "uni"
-    elif pool_choice == "2":
-        pool_type = "alg"
-    else:
-        print("Invalid pool type selected.")
+    print("Select exchange (shadow-exchange, swapx, wagmi, silverswap, spookyswap, sushiswap):")
+    exchange = input("Enter exchange name: ").strip().lower()
+    
+    # Define mapping from exchange to pool type.
+    exchange_to_pool = {
+        "shadow-exchange": "uni",
+        "swapx": "alg",
+        "wagmi": "uni",
+        "silverswap": "alg",
+        "spookyswap": "uni",
+        "sushiswap": "uni"
+    }
+    
+    if exchange not in exchange_to_pool:
+        print("Invalid exchange name.")
         return
-
+    
+    pool_type = exchange_to_pool[exchange]
     pool_address = input("Enter the target pool address: ").strip()
     direction = input("Enter direction ('buy' for buying using wS, 'sell' for selling for wS): ").strip().lower()
     if direction == "buy":
