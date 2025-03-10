@@ -21,8 +21,10 @@ assistant_id = "asst_IbPuyTELoe3dEZxhFzs05VbM"
 RPC_URL = os.environ.get("RPC_URL")
 PRIVATE_KEY = os.environ.get("PRIVATE_KEY")
 YOUR_ADDRESS = os.environ.get("YOUR_ADDRESS")
-SWAP_EXECUTOR_ADDRESS =os.environ.get("SWAP_EXECUTOR_ADDRESS")
+""" SWAP_EXECUTOR_ADDRESS =os.environ.get("SWAP_EXECUTOR_ADDRESS") """
 WS_ADDRESS = os.environ.get("WS_ADDRESS")  # Wrapped S token address
+SWAP_EXECUTOR_UNI_ADDRESS = os.environ.get("SWAP_EXECUTOR_UNI_ADDRESS")
+SWAP_EXECUTOR_ALG_ADDRESS = os.environ.get("SWAP_EXECUTOR_ALG_ADDRESS")
 
 
 
@@ -35,15 +37,17 @@ if not w3.is_connected():
 
 
 YOUR_ADDRESS = w3.to_checksum_address(YOUR_ADDRESS)
-SWAP_EXECUTOR_ADDRESS = w3.to_checksum_address(SWAP_EXECUTOR_ADDRESS)
+""" SWAP_EXECUTOR_ADDRESS = w3.to_checksum_address(SWAP_EXECUTOR_ADDRESS) """
 WS_ADDRESS = w3.to_checksum_address("0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38")
+SWAP_EXECUTOR_UNI_ADDRESS = w3.to_checksum_address(SWAP_EXECUTOR_UNI_ADDRESS)
+SWAP_EXECUTOR_ALG_ADDRESS = w3.to_checksum_address(SWAP_EXECUTOR_ALG_ADDRESS)
 
 # Load the SwapExecutor contract ABI from file
 with open('SwapExecutorUniABI.json', 'r') as abi_file:
     swap_executor_abi = json.load(abi_file)
 
-swap_executor = w3.eth.contract(address=SWAP_EXECUTOR_ADDRESS, abi=swap_executor_abi)
-
+""" swap_executor = w3.eth.contract(address=SWAP_EXECUTOR_ADDRESS, abi=swap_executor_abi)
+ """
 erc20_abi = [
     {
       "constant": True,
@@ -127,7 +131,7 @@ def check_and_approve(token_address, spender, required_amount):
         print("Approval receipt:", receipt)
     else:
         print("Sufficient allowance already exists.")
-        return {"status": "approved", "tx_hash": w3.to_hex(tx_hash)}
+        return {"status": "approved"}
     
     return {"status": "already_approved"}
 
@@ -219,14 +223,91 @@ def unwrap_native(amount):
     print("Unwrap receipt:", receipt)
 
 
-def execute_swap(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
+def get_pool_sqrt_price_uni(pool_address):
+    """Queries a UniswapV3-style pool's slot0() and returns sqrtPriceX96 as an integer."""
+    pool_address = w3.to_checksum_address(pool_address)
+    uni_abi = [
+        {
+            "inputs": [],
+            "name": "slot0",
+            "outputs": [
+                {"internalType": "uint160", "name": "sqrtPriceX96", "type": "uint160"},
+                {"internalType": "int24", "name": "tick", "type": "int24"},
+                {"internalType": "uint16", "name": "observationIndex", "type": "uint16"},
+                {"internalType": "uint16", "name": "observationCardinality", "type": "uint16"},
+                {"internalType": "uint16", "name": "observationCardinalityNext", "type": "uint16"},
+                {"internalType": "uint8", "name": "feeProtocol", "type": "uint8"},
+                {"internalType": "bool", "name": "unlocked", "type": "bool"}
+            ],
+            "stateMutability": "view",
+            "type": "function"
+        }
+    ]
+    try:
+        pool_contract = w3.eth.contract(address=pool_address, abi=uni_abi)
+        slot0 = pool_contract.functions.slot0().call()
+        sqrt_price = slot0[0]
+        print(f"Detected Uniswap pool. sqrtPriceX96: {sqrt_price}")
+        return sqrt_price
+    except Exception as e:
+        raise Exception("Not a Uniswap-style pool.")
+
+def get_pool_sqrt_price_alg(pool_address):
     """
-    Executes a swap via the SwapExecutor contract
-    For a buy swap (zeroForOne=True), it checks the wS balance and wraps native S if needed.
-    For a sell swap, after the swap it automatically unwraps the resulting wS back to S.
+    Queries an Algebra pool's globalState() and returns the current price (assumed to be sqrtPriceX96).
+    Adjust the ABI if your Algebra pool uses a different getter.
     """
     pool_address = w3.to_checksum_address(pool_address)
-    # Create a minimal pool instance to query token0 and token1.
+    alg_abi = [
+        {
+            "inputs": [],
+            "name": "globalState",
+            "outputs": [
+                {"internalType": "uint160", "name": "price", "type": "uint160"},
+                {"internalType": "int24", "name": "tick", "type": "int24"},
+                {"internalType": "uint16", "name": "fee", "type": "uint16"},
+                {"internalType": "uint16", "name": "index", "type": "uint16"},
+                {"internalType": "uint16", "name": "parameter", "type": "uint16"},
+                {"internalType": "bool", "name": "unlocked", "type": "bool"}
+            ],
+            "stateMutability": "view",
+            "type": "function"
+        }
+    ]
+    try:
+        pool_contract = w3.eth.contract(address=pool_address, abi=alg_abi)
+        gs = pool_contract.functions.globalState().call()
+        current_price = gs[0]
+        print(f"Detected Algebra pool. Current price: {current_price}")
+        return current_price
+    except Exception as e:
+        raise Exception("Not an Algebra-style pool.")
+
+def autodetect_pool_type(pool_address):
+    """
+    Attempts to autodetect the pool type by first trying a Uniswap-style call,
+    then an Algebra-style call.
+    Returns "uni" if Uniswap-style, "alg" if Algebra-style, or None if neither.
+    """
+    try:
+        get_pool_sqrt_price_uni(pool_address)
+        return "uni"
+    except Exception:
+        try:
+            get_pool_sqrt_price_alg(pool_address)
+            return "alg"
+        except Exception:
+            return None
+
+
+
+def execute_swap_uni(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
+    """
+    Executes a swap via the UniswapV3-style executor contract.
+    Checks wS balance for buy swaps and wraps native S if needed.
+    """
+    pool_address = w3.to_checksum_address(pool_address)
+    # Query the pool for token addresses.
     pool_contract = w3.eth.contract(address=pool_address, abi=[
         {
             "constant": True,
@@ -243,41 +324,33 @@ def execute_swap(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
             "type": "function"
         }
     ])
-    
     if zeroForOne:
-        # For a buy swap, we're spending token0 (wS) to buy token1 (EGGS).
         spend_token = pool_contract.functions.token0().call()
     else:
-        # For a sell swap, we're spending token1 (EGGS) to obtain token0 (wS).
         spend_token = pool_contract.functions.token1().call()
-    
-    print(f"Spending token for swap: {spend_token}")
-    
-    # For a buy swap, check wS balance; if insufficient, wrap native S.
+    print(f"Uniswap branch – spending token: {spend_token}")
+    check_and_approve(spend_token, SWAP_EXECUTOR_UNI_ADDRESS, amountSpecified)
     if zeroForOne:
         ws_contract = w3.eth.contract(address=WS_ADDRESS, abi=erc20_abi)
         current_ws_balance = ws_contract.functions.balanceOf(YOUR_ADDRESS).call()
         print(f"Current wS balance: {current_ws_balance}")
         if current_ws_balance < amountSpecified:
             deficit = amountSpecified - current_ws_balance
-            print(f"Insufficient wS balance. Wrapping {deficit} wei of native S into wS...")
+            print(f"Insufficient wS balance. Wrapping {deficit} wei native S into wS...")
             wrap_native(deficit)
-    
-    # Auto-approve the spending token if needed.
-    check_and_approve(spend_token, SWAP_EXECUTOR_ADDRESS, amountSpecified)
-    
-    # If sqrtPriceLimitX96 is zero, calculate it dynamically.
     if sqrtPriceLimitX96 == 0:
-        current_sqrt_price = get_pool_sqrt_price(pool_address)
+        current_sqrt_price = get_pool_sqrt_price_uni(pool_address)
         if zeroForOne:
             sqrtPriceLimitX96 = calculate_sqrt_price_limit_buy(current_sqrt_price)
         else:
             sqrtPriceLimitX96 = calculate_sqrt_price_limit_sell(current_sqrt_price)
-    
-    tx = swap_executor.functions.executeSwap(
+    with open('SwapExecutorUniABI.json', 'r') as abi_file:
+        uni_abi = json.load(abi_file)
+    uni_executor = w3.eth.contract(address=SWAP_EXECUTOR_UNI_ADDRESS, abi=uni_abi)
+    tx = uni_executor.functions.executeSwap(
         pool_address,
         zeroForOne,
-        amountSpecified,  # Convert to wei
+        amountSpecified,
         sqrtPriceLimitX96
     ).build_transaction({
         'from': YOUR_ADDRESS,
@@ -287,20 +360,104 @@ def execute_swap(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
     })
     signed_tx = w3.eth.account.sign_transaction(tx, private_key=PRIVATE_KEY)
     tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-    print("Swap tx sent. Tx hash:", w3.to_hex(tx_hash))
+    print("Uni swap tx sent. Tx hash:", w3.to_hex(tx_hash))
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-    print("Swap receipt:", receipt)
-    
-    # For a sell swap, automatically unwrap any resulting wS to native S.
+    print("Uni swap receipt:", receipt)
     if not zeroForOne:
         ws_contract = w3.eth.contract(address=WS_ADDRESS, abi=erc20_abi)
         ws_balance = ws_contract.functions.balanceOf(YOUR_ADDRESS).call()
         if ws_balance > 0:
-            print(f"Post-swap: unwrapping {ws_balance} wei of wS to native S...")
+            print(f"Post-sell (Uni): unwrapping {ws_balance} wei of wS to native S...")
+            unwrap_native(ws_balance)
+    return {"status": "swapped", "tx_hash": w3.to_hex(tx_hash)}
+
+def execute_swap_alg(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
+    """
+    Executes a swap via the Algebra executor contract.
+    The user provides the target Algebra pool address, direction, swap amount, and slippage limit.
+    Supports both buy (zeroForOne=True) and sell (zeroForOne=False) swaps.
+    """
+    pool_address = w3.to_checksum_address(pool_address)
+    # Query the pool for token addresses.
+    pool_contract = w3.eth.contract(address=pool_address, abi=[
+        {
+            "constant": True,
+            "inputs": [],
+            "name": "token0",
+            "outputs": [{"name": "", "type": "address"}],
+            "type": "function"
+        },
+        {
+            "constant": True,
+            "inputs": [],
+            "name": "token1",
+            "outputs": [{"name": "", "type": "address"}],
+            "type": "function"
+        }
+    ])
+    if zeroForOne:
+        spend_token = pool_contract.functions.token0().call()
+    else:
+        spend_token = pool_contract.functions.token1().call()
+    print(f"Algebra branch – spending token: {spend_token}")
+    check_and_approve(spend_token, SWAP_EXECUTOR_ALG_ADDRESS, amountSpecified)
+    if zeroForOne:
+        ws_contract = w3.eth.contract(address=WS_ADDRESS, abi=erc20_abi)
+        current_ws_balance = ws_contract.functions.balanceOf(YOUR_ADDRESS).call()
+        print(f"Current wS balance: {current_ws_balance}")
+        if current_ws_balance < amountSpecified:
+            deficit = amountSpecified - current_ws_balance
+            print(f"Insufficient wS balance. Wrapping {deficit} wei native S into wS...")
+            wrap_native(deficit)
+    if sqrtPriceLimitX96 == 0:
+        current_sqrt_price = get_pool_sqrt_price_alg(pool_address)
+        if zeroForOne:
+            sqrtPriceLimitX96 = calculate_sqrt_price_limit_buy(current_sqrt_price)
+        else:
+            sqrtPriceLimitX96 = calculate_sqrt_price_limit_sell(current_sqrt_price)
+    with open('SwapExecutorAlgABI.json', 'r') as abi_file:
+        alg_abi = json.load(abi_file)
+    alg_executor = w3.eth.contract(address=SWAP_EXECUTOR_ALG_ADDRESS, abi=alg_abi)
+    tx = alg_executor.functions.executeSwap(
+        pool_address,
+        zeroForOne,
+        amountSpecified,
+        sqrtPriceLimitX96
+    ).build_transaction({
+        'from': YOUR_ADDRESS,
+        'nonce': w3.eth.get_transaction_count(YOUR_ADDRESS),
+        'gas': 2000000,
+        'gasPrice': get_gas_price()
+    })
+    signed_tx = w3.eth.account.sign_transaction(tx, private_key=PRIVATE_KEY)
+    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+    print("Alg swap tx sent. Tx hash:", w3.to_hex(tx_hash))
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+    print("Alg swap receipt:", receipt)
+    if not zeroForOne:
+        ws_contract = w3.eth.contract(address=WS_ADDRESS, abi=erc20_abi)
+        ws_balance = ws_contract.functions.balanceOf(YOUR_ADDRESS).call()
+        if ws_balance > 0:
+            print(f"Post-sell (Alg): unwrapping {ws_balance} wei of wS to native S...")
             unwrap_native(ws_balance)
 
     return {"status": "swapped", "tx_hash": w3.to_hex(tx_hash)}
 
+
+def execute_swap(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
+    """
+    Automatically detects if the pool is Uniswap or Algebra, then calls the appropriate function.
+    """
+    pool_type = autodetect_pool_type(pool_address)
+    if pool_type == "uni":
+        print("Detected Uniswap pool. Routing to execute_swap_uni...")
+        return execute_swap_uni(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96)
+    elif pool_type == "alg":
+        print("Detected Algebra pool. Routing to execute_swap_alg...")
+        return execute_swap_alg(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96)
+    else:
+        raise Exception("Could not detect pool type. Not a Uniswap or Algebra pool.")
+    
 
 def create_thread():
     print("Creating a new thread...")
@@ -608,13 +765,13 @@ def get_pair_info(chain_id, token_address):
         return arbitrage_report
     else:
         return "No pool data found."
-@app.route('/approve', methods=['POST'])
+""" @app.route('/approve', methods=['POST'])
 def approve_endpoint():
     data = request.get_json()
     token_address = data.get("token_address")
     amount = int(data.get("amount"))
     response = check_and_approve(token_address, SWAP_EXECUTOR_ADDRESS, amount)
-    return jsonify(response)
+    return jsonify(response) """
 
 @app.route('/swap', methods=['POST'])
 def swap_endpoint():
@@ -692,14 +849,7 @@ def message_endpoint():
                     tool_outputs.append({"call_id": tool_call.id, "output": response})
                     print("✅ Swap execution response sent to OpenAI!")
 
-                elif function_name == "approve_tokens":
-                    response = check_and_approve(
-                        parsed_args.get("token_address"),
-                        SWAP_EXECUTOR_ADDRESS,
-                        parsed_args.get("amount")
-                    )
-                    tool_outputs.append({"call_id": tool_call.id, "output": response})
-                    print("✅ Token approval response sent to OpenAI!")
+              
 
             # Submit all tool outputs at once to prevent missing responses
             if tool_outputs:
@@ -710,3 +860,13 @@ def message_endpoint():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 3001))
     app.run(host="0.0.0.0", port=port)
+
+
+"""  elif function_name == "approve_tokens":
+                    response = check_and_approve(
+                        parsed_args.get("token_address"),
+                        SWAP_EXECUTOR_ADDRESS,
+                        parsed_args.get("amount")
+                    )
+                    tool_outputs.append({"call_id": tool_call.id, "output": response})
+                    print("✅ Token approval response sent to OpenAI!") """
