@@ -244,6 +244,7 @@ def execute_swap_uni(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX9
     """
     Executes a swap via the UniswapV3-style executor contract.
     Checks wS balance for buy swaps and wraps native S if needed.
+    After the swap, if the output token equals wS, auto-unwraps.
     """
     pool_address = w3.to_checksum_address(pool_address)
     # Query the pool for token addresses.
@@ -263,13 +264,21 @@ def execute_swap_uni(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX9
             "type": "function"
         }
     ])
+    token0 = pool_contract.functions.token0().call()
+    token1 = pool_contract.functions.token1().call()
+    # For Uniswap-style:
+    # If zeroForOne is True, you're selling token0 to receive token1.
+    # If zeroForOne is False, you're selling token1 to receive token0.
     if zeroForOne:
-        spend_token = pool_contract.functions.token0().call()
+        spend_token = token0
+        output_token = token1
     else:
-        spend_token = pool_contract.functions.token1().call()
+        spend_token = token1
+        output_token = token0
     print(f"Uniswap branch – spending token: {spend_token}")
     check_and_approve(spend_token, SWAP_EXECUTOR_UNI_ADDRESS, amountSpecified)
-    if zeroForOne:
+    # Auto-wrap only if spending token is wS.
+    if zeroForOne and w3.to_checksum_address(spend_token) == WS_ADDRESS:
         ws_contract = w3.eth.contract(address=WS_ADDRESS, abi=erc20_abi)
         current_ws_balance = ws_contract.functions.balanceOf(YOUR_ADDRESS).call()
         print(f"Current wS balance: {current_ws_balance}")
@@ -302,7 +311,8 @@ def execute_swap_uni(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX9
     print("Uni swap tx sent. Tx hash:", w3.to_hex(tx_hash))
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
     print("Uni swap receipt:", receipt)
-    if not zeroForOne:
+    # After a sell swap, if the output token equals WS_ADDRESS, auto-unwrap.
+    if not zeroForOne and w3.to_checksum_address(output_token) == WS_ADDRESS:
         ws_contract = w3.eth.contract(address=WS_ADDRESS, abi=erc20_abi)
         ws_balance = ws_contract.functions.balanceOf(YOUR_ADDRESS).call()
         if ws_balance > 0:
@@ -314,6 +324,7 @@ def execute_swap_alg(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX9
     Executes a swap via the Algebra executor contract.
     The user provides the target Algebra pool address, direction, swap amount, and slippage limit.
     Supports both buy (zeroForOne=True) and sell (zeroForOne=False) swaps.
+    Auto-wrap/unwrap is applied only if the spending (or output) token equals wS.
     """
     pool_address = w3.to_checksum_address(pool_address)
     # Query the pool for token addresses.
@@ -333,13 +344,18 @@ def execute_swap_alg(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX9
             "type": "function"
         }
     ])
+    token0 = pool_contract.functions.token0().call()
+    token1 = pool_contract.functions.token1().call()
     if zeroForOne:
-        spend_token = pool_contract.functions.token0().call()
+        spend_token = token0
+        output_token = token1
     else:
-        spend_token = pool_contract.functions.token1().call()
+        spend_token = token1
+        output_token = token0
     print(f"Algebra branch – spending token: {spend_token}")
     check_and_approve(spend_token, SWAP_EXECUTOR_ALG_ADDRESS, amountSpecified)
-    if zeroForOne:
+    # Auto-wrap only if spending token is wS.
+    if zeroForOne and w3.to_checksum_address(spend_token) == WS_ADDRESS:
         ws_contract = w3.eth.contract(address=WS_ADDRESS, abi=erc20_abi)
         current_ws_balance = ws_contract.functions.balanceOf(YOUR_ADDRESS).call()
         print(f"Current wS balance: {current_ws_balance}")
@@ -372,7 +388,8 @@ def execute_swap_alg(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX9
     print("Alg swap tx sent. Tx hash:", w3.to_hex(tx_hash))
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
     print("Alg swap receipt:", receipt)
-    if not zeroForOne:
+    # After a sell swap, if the output token equals WS_ADDRESS, auto-unwrap.
+    if not zeroForOne and w3.to_checksum_address(output_token) == WS_ADDRESS:
         ws_contract = w3.eth.contract(address=WS_ADDRESS, abi=erc20_abi)
         ws_balance = ws_contract.functions.balanceOf(YOUR_ADDRESS).call()
         if ws_balance > 0:
@@ -381,19 +398,10 @@ def execute_swap_alg(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX9
 
 def main():
     pool_address = input("Enter the target pool address: ").strip()
-    # Autodetect pool type using minimal calls.
-    pool_type = None
-    try:
-        pool_type = "uni"  # try uni first
-        _ = get_pool_sqrt_price_uni(pool_address)
-    except Exception:
-        try:
-            pool_type = "alg"
-            _ = get_pool_sqrt_price_alg(pool_address)
-        except Exception:
-            print("Could not autodetect pool type for this address.")
-            return
-
+    pool_type = autodetect_pool_type(pool_address)
+    if pool_type is None:
+        print("Could not autodetect pool type for this address.")
+        return
     print(f"Autodetected pool type: {pool_type}")
     direction = input("Enter direction ('buy' for buying using wS, 'sell' for selling for wS): ").strip().lower()
     if direction == "buy":
