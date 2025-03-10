@@ -88,7 +88,7 @@ ws_abi = [
 ]
 
 def check_and_approve(token_address, spender, required_amount):
-    """Checks token allowance and sends an approval transaction if needed."""
+    """Checks token allowance and sends an approval tx if needed."""
     token_address = w3.to_checksum_address(token_address)
     token_contract = w3.eth.contract(address=token_address, abi=erc20_abi)
     current_allowance = token_contract.functions.allowance(YOUR_ADDRESS, spender).call()
@@ -112,7 +112,7 @@ def check_and_approve(token_address, spender, required_amount):
 def get_pool_sqrt_price_uni(pool_address):
     """Queries a UniswapV3-style pool's slot0() and returns sqrtPriceX96 as an integer."""
     pool_address = w3.to_checksum_address(pool_address)
-    pool_contract = w3.eth.contract(address=pool_address, abi=[
+    uni_abi = [
         {
             "inputs": [],
             "name": "slot0",
@@ -128,11 +128,15 @@ def get_pool_sqrt_price_uni(pool_address):
             "stateMutability": "view",
             "type": "function"
         }
-    ])
-    slot0 = pool_contract.functions.slot0().call()
-    sqrt_price = slot0[0]
-    print(f"Uniswap pool sqrtPriceX96: {sqrt_price}")
-    return sqrt_price
+    ]
+    try:
+        pool_contract = w3.eth.contract(address=pool_address, abi=uni_abi)
+        slot0 = pool_contract.functions.slot0().call()
+        sqrt_price = slot0[0]
+        print(f"Detected Uniswap pool. sqrtPriceX96: {sqrt_price}")
+        return sqrt_price
+    except Exception as e:
+        raise Exception("Not a Uniswap-style pool.")
 
 def get_pool_sqrt_price_alg(pool_address):
     """
@@ -140,7 +144,7 @@ def get_pool_sqrt_price_alg(pool_address):
     Adjust the ABI if your Algebra pool uses a different getter.
     """
     pool_address = w3.to_checksum_address(pool_address)
-    algebra_abi = [
+    alg_abi = [
         {
             "inputs": [],
             "name": "globalState",
@@ -156,11 +160,30 @@ def get_pool_sqrt_price_alg(pool_address):
             "type": "function"
         }
     ]
-    pool_contract = w3.eth.contract(address=pool_address, abi=algebra_abi)
-    gs = pool_contract.functions.globalState().call()
-    current_price = gs[0]
-    print(f"Algebra pool current price: {current_price}")
-    return current_price
+    try:
+        pool_contract = w3.eth.contract(address=pool_address, abi=alg_abi)
+        gs = pool_contract.functions.globalState().call()
+        current_price = gs[0]
+        print(f"Detected Algebra pool. Current price: {current_price}")
+        return current_price
+    except Exception as e:
+        raise Exception("Not an Algebra-style pool.")
+
+def autodetect_pool_type(pool_address):
+    """
+    Attempts to autodetect the pool type by first trying a Uniswap-style call,
+    then an Algebra-style call.
+    Returns "uni" if Uniswap-style, "alg" if Algebra-style, or None if neither.
+    """
+    try:
+        get_pool_sqrt_price_uni(pool_address)
+        return "uni"
+    except Exception:
+        try:
+            get_pool_sqrt_price_alg(pool_address)
+            return "alg"
+        except Exception:
+            return None
 
 def calculate_sqrt_price_limit_buy(current_sqrt_price):
     """Calculates a buy swap price limit 5% lower than current sqrtPriceX96."""
@@ -283,7 +306,7 @@ def execute_swap_uni(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX9
         ws_contract = w3.eth.contract(address=WS_ADDRESS, abi=erc20_abi)
         ws_balance = ws_contract.functions.balanceOf(YOUR_ADDRESS).call()
         if ws_balance > 0:
-            print(f"Post-sell: unwrapping {ws_balance} wei of wS to native S...")
+            print(f"Post-sell (Uni): unwrapping {ws_balance} wei of wS to native S...")
             unwrap_native(ws_balance)
 
 def execute_swap_alg(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX96):
@@ -293,7 +316,6 @@ def execute_swap_alg(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX9
     Supports both buy (zeroForOne=True) and sell (zeroForOne=False) swaps.
     """
     pool_address = w3.to_checksum_address(pool_address)
-    
     # Query the pool for token addresses.
     pool_contract = w3.eth.contract(address=pool_address, abi=[
         {
@@ -311,15 +333,12 @@ def execute_swap_alg(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX9
             "type": "function"
         }
     ])
-    
     if zeroForOne:
         spend_token = pool_contract.functions.token0().call()
     else:
         spend_token = pool_contract.functions.token1().call()
     print(f"Algebra branch – spending token: {spend_token}")
     check_and_approve(spend_token, SWAP_EXECUTOR_ALG_ADDRESS, amountSpecified)
-    
-    # For buy swaps, check wS balance and wrap native S if needed.
     if zeroForOne:
         ws_contract = w3.eth.contract(address=WS_ADDRESS, abi=erc20_abi)
         current_ws_balance = ws_contract.functions.balanceOf(YOUR_ADDRESS).call()
@@ -328,7 +347,6 @@ def execute_swap_alg(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX9
             deficit = amountSpecified - current_ws_balance
             print(f"Insufficient wS balance. Wrapping {deficit} wei native S into wS...")
             wrap_native(deficit)
-            
     if sqrtPriceLimitX96 == 0:
         current_sqrt_price = get_pool_sqrt_price_alg(pool_address)
         if zeroForOne:
@@ -362,25 +380,21 @@ def execute_swap_alg(pool_address, zeroForOne, amountSpecified, sqrtPriceLimitX9
             unwrap_native(ws_balance)
 
 def main():
-    print("Select exchange (shadow-exchange, swapx, wagmi, silverswap, spookyswap, sushiswap):")
-    exchange = input("Enter exchange name: ").strip().lower()
-    
-    # Define mapping from exchange to pool type.
-    exchange_to_pool = {
-        "shadow-exchange": "uni",
-        "swapx": "alg",
-        "wagmi": "uni",
-        "silverswap": "alg",
-        "spookyswap": "uni",
-        "sushiswap": "uni"
-    }
-    
-    if exchange not in exchange_to_pool:
-        print("Invalid exchange name.")
-        return
-    
-    pool_type = exchange_to_pool[exchange]
     pool_address = input("Enter the target pool address: ").strip()
+    # Autodetect pool type using minimal calls.
+    pool_type = None
+    try:
+        pool_type = "uni"  # try uni first
+        _ = get_pool_sqrt_price_uni(pool_address)
+    except Exception:
+        try:
+            pool_type = "alg"
+            _ = get_pool_sqrt_price_alg(pool_address)
+        except Exception:
+            print("Could not autodetect pool type for this address.")
+            return
+
+    print(f"Autodetected pool type: {pool_type}")
     direction = input("Enter direction ('buy' for buying using wS, 'sell' for selling for wS): ").strip().lower()
     if direction == "buy":
         zero_for_one = True
@@ -400,7 +414,7 @@ def main():
     
     if pool_type == "uni":
         execute_swap_uni(pool_address, zero_for_one, amountSpecified, sqrtPriceLimitX96)
-    else:  # pool_type == "alg"
+    elif pool_type == "alg":
         execute_swap_alg(pool_address, zero_for_one, amountSpecified, sqrtPriceLimitX96)
 
 if __name__ == "__main__":
